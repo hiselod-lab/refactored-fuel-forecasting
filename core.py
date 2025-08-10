@@ -82,12 +82,12 @@ def enhanced_feature_engineering(df: pd.DataFrame, forecasting_mode: bool = Fals
                                            df['avg_price'] / df['sales_volume'],
                                            np.nan)
     else:
-        # Minimal price features based on sales volume patterns
-        df['price_elasticity'] = 1.0
-        df['price_volatility'] = 0.05  # Low constant volatility
-        df['price_change'] = 0.0
-        df['price_volume_ratio'] = df['sales_volume'] * 100
-        df['price_over_volume'] = 0.01
+        # If price information is unavailable, leave price features as NaN
+        df['price_elasticity'] = np.nan
+        df['price_volatility'] = np.nan
+        df['price_change'] = np.nan
+        df['price_volume_ratio'] = np.nan
+        df['price_over_volume'] = np.nan
 
     # Core volume-related features (deterministic trends)
     df['volume_trend'] = df.groupby(['Region', 'Product'])['sales_volume'].transform(
@@ -191,121 +191,11 @@ def evaluate_preds(y_true: pd.Series, y_pred: np.ndarray) -> Dict[str, float]:
 
 
 def create_missing_features(data: pd.DataFrame, required_features: list) -> pd.DataFrame:
-    """Create any missing features with appropriate default values.
-    
-    Args:
-        data: DataFrame to add features to
-        required_features: List of required feature names
-    
-    Returns:
-        DataFrame with all required features
-    """
+    """Ensure required feature columns exist without injecting static defaults."""
     data = data.copy()
-    
     for col in required_features:
         if col not in data.columns:
-            if col.startswith('lag_'):
-                # For lag features, use the last available sales volume
-                lag_num = int(col.split('_')[1])
-                if 'sales_volume' in data.columns and len(data) > lag_num:
-                    data[col] = data['sales_volume'].shift(lag_num)
-                else:
-                    # Use a reasonable default based on available sales volume
-                    if 'sales_volume' in data.columns and len(data) > 0:
-                        data[col] = data['sales_volume'].mean()
-                    else:
-                        data[col] = 1000.0  # Default sales volume
-            elif col in ['price_elasticity', 'price_volatility', 'price_change', 'price_volume_ratio', 'price_over_volume']:
-                # For price-related features, use sales volume as proxy
-                if 'sales_volume' in data.columns:
-                    if col == 'price_elasticity':
-                        data[col] = data['sales_volume'] / data['sales_volume'].mean() if data['sales_volume'].mean() > 0 else 1.0
-                    elif col == 'price_volatility':
-                        data[col] = data['sales_volume'].rolling(4, min_periods=1).std() / (data['sales_volume'].mean() + 1e-10)
-                    elif col == 'price_change':
-                        data[col] = data['sales_volume'].pct_change() * 0.1
-                    elif col == 'price_volume_ratio':
-                        data[col] = data['sales_volume'] * 100
-                    elif col == 'price_over_volume':
-                        data[col] = np.where(data['sales_volume'] != 0, 100 / data['sales_volume'], 1.0)
-                else:
-                    # Default values when sales_volume is not available
-                    if col == 'price_elasticity':
-                        data[col] = 1.0
-                    elif col == 'price_volatility':
-                        data[col] = 0.1
-                    elif col == 'price_change':
-                        data[col] = 0.0
-                    elif col == 'price_volume_ratio':
-                        data[col] = 100000.0
-                    elif col == 'price_over_volume':
-                        data[col] = 0.1
-            elif col in ['event_factor']:
-                # For external factors, use realistic random values
-                np.random.seed(42)  # For consistency
-                if col == 'event_factor':
-                    data[col] = np.random.normal(1, 0.15, len(data))
-            elif col in ['avg_price']:
-                # For avg_price, use a reasonable default
-                data[col] = 100.0
-            elif col in ['month']:
-                # Extract month from week_start if available
-                if 'week_start' in data.columns:
-                    try:
-                        # Ensure week_start is datetime
-                        if not pd.api.types.is_datetime64_any_dtype(data['week_start']):
-                            data['week_start'] = pd.to_datetime(data['week_start'])
-                        data[col] = data['week_start'].dt.month
-                    except Exception:
-                        # If conversion fails, use a default month
-                        data[col] = 6  # Default to June
-                else:
-                    # Default to June if no week_start column
-                    data[col] = 6
-            elif col in ['is_holiday_week']:
-                # Extract holiday weeks from month if available
-                if 'month' in data.columns:
-                    data[col] = data['month'].isin([12, 1, 7, 8]).astype(int)
-                elif 'week_start' in data.columns:
-                    try:
-                        # Ensure week_start is datetime
-                        if not pd.api.types.is_datetime64_any_dtype(data['week_start']):
-                            data['week_start'] = pd.to_datetime(data['week_start'])
-                        month_col = data['week_start'].dt.month
-                        data[col] = month_col.isin([12, 1, 7, 8]).astype(int)
-                    except Exception:
-                        # Default to non-holiday
-                        data[col] = 0
-                else:
-                    # Default to non-holiday
-                    data[col] = 0
-            elif col.startswith('monthly_'):
-                # Monthly cyclical features
-                month_col = None
-                if 'month' in data.columns:
-                    month_col = data['month']
-                elif 'week_start' in data.columns:
-                    try:
-                        # Ensure week_start is datetime
-                        if not pd.api.types.is_datetime64_any_dtype(data['week_start']):
-                            data['week_start'] = pd.to_datetime(data['week_start'])
-                        month_col = data['week_start'].dt.month
-                        # Also create the month column for future use
-                        if 'month' not in data.columns:
-                            data['month'] = month_col
-                    except Exception:
-                        month_col = pd.Series([6] * len(data), index=data.index)  # Default to June
-                else:
-                    month_col = pd.Series([6] * len(data), index=data.index)  # Default to June
-                
-                if col == 'monthly_sin':
-                    data[col] = np.sin(2 * np.pi * month_col / 12)
-                elif col == 'monthly_cos':
-                    data[col] = np.cos(2 * np.pi * month_col / 12)
-            else:
-                # For any other missing features, use zero
-                data[col] = 0.0
-    
+            data[col] = np.nan
     return data
 
 
@@ -365,6 +255,9 @@ def train_models(df: pd.DataFrame, feature_cols: list, config: ModelConfig) -> D
     """
     from sklearn.model_selection import TimeSeriesSplit
     from helpers import time_series_cv_scores
+
+    # Drop warm-up rows lacking essential lag features to prevent leakage
+    df = df.dropna(subset=['lag_1', 'lag_2', 'lag_4', 'lag_8']).reset_index(drop=True)
     
     # Step 1: Split data and evaluate model performance
     split_method = (config.split_method or 'Time-based')
@@ -629,7 +522,7 @@ def generate_forecast(model_bundle: Dict[str, Any], history: pd.DataFrame, steps
     if not pd.api.types.is_datetime64_any_dtype(history['week_start']):
         history['week_start'] = pd.to_datetime(history['week_start'])
 
-    # Ensure all required features are created
+    # Create base features once for existing history
     history = enhanced_feature_engineering(history, forecasting_mode=False, random_state=42)
     history = create_missing_features(history, feature_cols)
 
@@ -640,26 +533,23 @@ def generate_forecast(model_bundle: Dict[str, Any], history: pd.DataFrame, steps
 
     # Generate forecasts iteratively
     for step in range(steps):
-        # Create new row with next date
+        # Create base row for next date
         next_date = history['week_start'].iloc[-1] + timedelta(days=7)
-        new_row = history.iloc[-1:].copy()
-        new_row['week_start'] = next_date
-        
-        # Add new row to history
-        history = pd.concat([history, new_row], ignore_index=True)
-        
-        # Recalculate ALL features with forecasting_mode=True for realistic external factors
-        eng = enhanced_feature_engineering(history, forecasting_mode=True)
-        eng = create_missing_features(eng, feature_cols)
-        
-        # Get features for prediction
-        features = eng[feature_cols].iloc[-1:]
+        base_row = pd.DataFrame({
+            'week_start': [next_date],
+            'Region': [history['Region'].iloc[-1]],
+            'Product': [history['Product'].iloc[-1]],
+            'sales_volume': [np.nan]
+        })
+
+        # Compute features for prediction using recent history
+        future_feat = compute_forecast_features(history, base_row)
+        features = future_feat[feature_cols]
 
         # Apply preprocessing
         features_clean = pd.DataFrame(imputer.transform(features), columns=feature_cols, index=features.index)
         if selector is not None:
             features_sel = selector.transform(features_clean)
-            # Ensure we have a 2D array after feature selection
             if isinstance(features_sel, np.ndarray):
                 if features_sel.ndim == 1:
                     features_sel = features_sel.reshape(1, -1)
@@ -667,40 +557,34 @@ def generate_forecast(model_bundle: Dict[str, Any], history: pd.DataFrame, steps
                     features_sel = features_sel.reshape(features_sel.shape[0], -1)
         else:
             features_sel = features_clean.values
-            
-        # Ensure input is 2D for model prediction
+
         if isinstance(features_sel, np.ndarray):
             if features_sel.ndim == 1:
                 features_sel = features_sel.reshape(1, -1)
             elif features_sel.ndim > 2:
                 features_sel = features_sel.reshape(features_sel.shape[0], -1)
 
-        # Make predictions with both models
+        # Make predictions
         pred_lgbm = lgbm.predict(features_sel)
         pred_rf = rf.predict(features_sel)
-        
-        # Combine predictions according to ensemble method
         if ensemble_method == 'Weighted Average':
             forecast = lgbm_weight * pred_lgbm + (1 - lgbm_weight) * pred_rf
         else:
             forecast = (pred_lgbm + pred_rf) / 2
-            
-        # Store forecast and date
+
         forecasts.append(forecast[0])
         dates.append(next_date)
 
-        # Calculate confidence intervals with increasing uncertainty over time
         if include_confidence:
-            # Increase uncertainty for longer forecast horizons
-            step_factor = 1 + (step * 0.1)  # 10% increase in uncertainty per step
+            step_factor = 1 + (step * 0.1)
             margin = z * error_estimate * step_factor
-            
-            # Ensure lower bound is non-negative
             lower.append(max(0, forecast[0] - margin))
             upper.append(forecast[0] + margin)
 
-        # Update history with the forecasted value for next iteration
-        history.loc[history.index[-1], 'sales_volume'] = forecast[0]
+        # Append prediction to history for next iteration
+        base_row['sales_volume'] = forecast[0]
+        new_row = compute_forecast_features(history, base_row)
+        history = pd.concat([history, new_row], ignore_index=True)
 
     # Return results as a dictionary
     result = {
@@ -794,43 +678,27 @@ def generate_detailed_forecast(res: Dict[str, Any], group_eng: pd.DataFrame, pro
     # Create missing features for the original feature set (not the selected subset)
     group_eng = create_missing_features(group_eng, feature_cols)
 
-    last_data = group_eng.iloc[-1:].copy()
-    last_date = pd.to_datetime(last_data['week_start'].iloc[0])
-
-    forecast_dates = [last_date + timedelta(days=7 * i) for i in range(1, forecast_weeks + 1)]
+    forecast_dates = []
     forecast_values = []
     lower_bounds = []
     upper_bounds = []
 
     if forecast_method == 'Direct':
-        # Create a copy of the historical data to use for feature engineering
         forecast_history = group_eng.copy()
-        
-        for i in range(forecast_weeks):
-            # Create a new row for the forecast date
-            future_data = last_data.copy()
-            future_data['week_start'] = forecast_dates[i]
-            future_data['week_start'] = pd.to_datetime(future_data['week_start'])
-            
-            # Add the future data row to the history for proper feature calculation
-            temp_history = pd.concat([forecast_history, future_data], ignore_index=True)
-            
-            # Apply enhanced feature engineering with forecasting_mode=True for realistic external factors
-            temp_history = enhanced_feature_engineering(temp_history, forecasting_mode=True)
-            temp_history = create_missing_features(temp_history, feature_cols)
-            
-            # Get the last row which contains our forecast features
-            future_data = temp_history.iloc[-1:].copy()
-            
-            # No additional product-specific adjustments - rely on deterministic features only
-            # The enhanced_feature_engineering with forecasting_mode=True already provides
-            # stable, deterministic features without noise
 
-            # Use the same logic as the original: extract features using feature_cols, then apply preprocessing
-            X_future = future_data[feature_cols]
+        for i in range(forecast_weeks):
+            next_date = forecast_history['week_start'].iloc[-1] + timedelta(days=7)
+            base_row = pd.DataFrame({
+                'week_start': [next_date],
+                'Region': [forecast_history['Region'].iloc[-1]],
+                'Product': [forecast_history['Product'].iloc[-1]],
+                'sales_volume': [np.nan]
+            })
+
+            future_feat = compute_forecast_features(forecast_history, base_row)
+            X_future = future_feat[feature_cols]
             X_future_clean = pd.DataFrame(imputer.transform(X_future), columns=feature_cols, index=X_future.index)
-            
-            # Apply feature selection only if it was enabled during training
+
             if feature_selection_enabled and selector is not None:
                 X_future_sel = selector.transform(X_future_clean)
                 if isinstance(X_future_sel, np.ndarray):
@@ -840,44 +708,38 @@ def generate_detailed_forecast(res: Dict[str, Any], group_eng: pd.DataFrame, pro
                         X_future_sel = X_future_sel.reshape(X_future_sel.shape[0], -1)
             else:
                 X_future_sel = X_future_clean.values
-            
-            # Handle any remaining NaN values
+
             X_future_sel = np.nan_to_num(X_future_sel, nan=0.0, posinf=0.0, neginf=0.0)
-                
-            # Ensure input is 2D for model prediction
+
             if isinstance(X_future_sel, np.ndarray):
                 if X_future_sel.ndim == 1:
                     X_future_sel = X_future_sel.reshape(1, -1)
                 elif X_future_sel.ndim > 2:
                     X_future_sel = X_future_sel.reshape(X_future_sel.shape[0], -1)
 
-            # Make predictions
             pred_lgbm = lgbm.predict(X_future_sel)
             pred_rf = rf.predict(X_future_sel)
-            
-            # Combine predictions
             if ensemble_method == 'Weighted Average':
                 forecast = lgbm_weight * pred_lgbm + (1 - lgbm_weight) * pred_rf
             else:
                 forecast = (pred_lgbm + pred_rf) / 2
-                
+
             forecast_values.append(forecast[0])
-            
-            # Calculate confidence intervals
+            forecast_dates.append(next_date)
+
             if include_confidence:
                 z_lookup = {0.99: 2.58, 0.95: 1.96, 0.9: 1.645, 0.8: 1.28}
                 z = z_lookup.get(confidence_level, 1.96)
-                
-                # Use RMSE from metrics for error estimation
-                error_estimate = metrics.get('RMSE', 0) if metrics.get('RMSE', 0) > 0 else historical_volatility * y_test.mean() if len(y_test) > 0 else 1000
-                
-                # Increase uncertainty for longer forecast horizons
+                error_estimate = metrics.get('RMSE', 0)
                 step_factor = 1 + (i * 0.1)
                 margin = z * error_estimate * step_factor
-                
                 lower_bounds.append(max(0, forecast[0] - margin))
                 upper_bounds.append(forecast[0] + margin)
-    
+
+            base_row['sales_volume'] = forecast[0]
+            new_row = compute_forecast_features(forecast_history, base_row)
+            forecast_history = pd.concat([forecast_history, new_row], ignore_index=True)
+
     else:  # Recursive forecasting
         # Use the generate_forecast function for recursive forecasting
         forecast_result = generate_forecast(
@@ -886,10 +748,11 @@ def generate_detailed_forecast(res: Dict[str, Any], group_eng: pd.DataFrame, pro
              'residual_std': metrics.get('RMSE', 0), 'test_data': {'y_test': y_test, 'y_pred': pd.Series()}},
             group_eng, forecast_weeks, include_confidence, confidence_level
         )
-        
+
         forecast_values = forecast_result.get('values', [])
         lower_bounds = forecast_result.get('lower_bounds', [])
         upper_bounds = forecast_result.get('upper_bounds', [])
+        forecast_dates = forecast_result.get('dates', [])
 
     # Return results
     return {
@@ -967,13 +830,17 @@ def initialize_session_state():
 
 
 def get_feature_columns(df: pd.DataFrame) -> list:
-    """Get feature columns from a DataFrame, excluding target and metadata columns.
-    
-    Args:
-        df: DataFrame to extract feature columns from
-    
-    Returns:
-        List of feature column names
-    """
+    """Get feature columns from a DataFrame, excluding target and metadata columns."""
     excluded_cols = ['Region', 'Product', 'week_start', 'sales_volume', 'sales_amount']
     return [col for col in df.columns if col not in excluded_cols]
+
+
+def compute_forecast_features(history: pd.DataFrame, future_row: pd.DataFrame) -> pd.DataFrame:
+    """Compute features for ``future_row`` using recent ``history`` only."""
+    window = 32  # covers maximum rolling window with margin
+    recent = history.tail(window)
+    temp = pd.concat([recent, future_row], ignore_index=True)
+    temp = enhanced_feature_engineering(temp, forecasting_mode=True)
+    required = get_feature_columns(temp)
+    temp = create_missing_features(temp, required)
+    return temp.iloc[-1:]
