@@ -190,6 +190,31 @@ def evaluate_preds(y_true: pd.Series, y_pred: np.ndarray) -> Dict[str, float]:
     return {'MAE': mae, 'RMSE': rmse, 'R2': r2, 'SMAPE': smape}
 
 
+def export_forecast_debug(history: pd.DataFrame, forecast: Dict[str, Any], path_prefix: str) -> None:
+    """Export forecast and actual history to CSV and PNG for manual inspection."""
+    df_forecast = pd.DataFrame({
+        'week_start': forecast.get('dates', []),
+        'forecast': forecast.get('values', [])
+    })
+    try:
+        df_forecast.to_csv(f"{path_prefix}_forecast.csv", index=False)
+        if 'week_start' in history.columns and 'sales_volume' in history.columns:
+            hist = history[['week_start', 'sales_volume']]
+            merged = pd.merge(hist, df_forecast, on='week_start', how='outer')
+            merged.to_csv(f"{path_prefix}_merged.csv", index=False)
+
+            import matplotlib.pyplot as plt
+            plt.figure()
+            plt.plot(hist['week_start'], hist['sales_volume'], label='actual')
+            plt.plot(df_forecast['week_start'], df_forecast['forecast'], label='forecast')
+            plt.legend()
+            plt.tight_layout()
+            plt.savefig(f"{path_prefix}_plot.png")
+            plt.close()
+    except Exception as e:
+        logger.info(f"Debug export failed: {e}")
+
+
 def create_missing_features(data: pd.DataFrame, required_features: list) -> pd.DataFrame:
     """Create any missing features with appropriate default values.
     
@@ -205,49 +230,40 @@ def create_missing_features(data: pd.DataFrame, required_features: list) -> pd.D
     for col in required_features:
         if col not in data.columns:
             if col.startswith('lag_'):
-                # For lag features, use the last available sales volume
+                # Use available history for lag features; otherwise leave as NaN
                 lag_num = int(col.split('_')[1])
                 if 'sales_volume' in data.columns and len(data) > lag_num:
                     data[col] = data['sales_volume'].shift(lag_num)
                 else:
-                    # Use a reasonable default based on available sales volume
-                    if 'sales_volume' in data.columns and len(data) > 0:
-                        data[col] = data['sales_volume'].mean()
-                    else:
-                        data[col] = 1000.0  # Default sales volume
-            elif col in ['price_elasticity', 'price_volatility', 'price_change', 'price_volume_ratio', 'price_over_volume']:
-                # For price-related features, use sales volume as proxy
-                if 'sales_volume' in data.columns:
+                    data[col] = np.nan
+            elif col in ['price_elasticity', 'price_volatility', 'price_change',
+                         'price_volume_ratio', 'price_over_volume']:
+                # Price related features are left NaN if price information is missing
+                if 'avg_price' in data.columns:
+                    # Derive simple proxies when average price exists
                     if col == 'price_elasticity':
-                        data[col] = data['sales_volume'] / data['sales_volume'].mean() if data['sales_volume'].mean() > 0 else 1.0
+                        data[col] = np.where(data['avg_price'] != 0,
+                                             data['sales_volume'] / data['avg_price'],
+                                             np.nan)
                     elif col == 'price_volatility':
-                        data[col] = data['sales_volume'].rolling(4, min_periods=1).std() / (data['sales_volume'].mean() + 1e-10)
+                        data[col] = data.groupby(['Region', 'Product'])['avg_price'].transform(
+                            lambda x: x.rolling(4, min_periods=1).std()
+                        )
                     elif col == 'price_change':
-                        data[col] = data['sales_volume'].pct_change() * 0.1
+                        data[col] = data.groupby(['Region', 'Product'])['avg_price'].transform(
+                            lambda x: x.pct_change()
+                        )
                     elif col == 'price_volume_ratio':
-                        data[col] = data['sales_volume'] * 100
+                        data[col] = data['avg_price'] * data['sales_volume']
                     elif col == 'price_over_volume':
-                        data[col] = np.where(data['sales_volume'] != 0, 100 / data['sales_volume'], 1.0)
+                        data[col] = np.where(data['sales_volume'] != 0,
+                                             data['avg_price'] / data['sales_volume'],
+                                             np.nan)
                 else:
-                    # Default values when sales_volume is not available
-                    if col == 'price_elasticity':
-                        data[col] = 1.0
-                    elif col == 'price_volatility':
-                        data[col] = 0.1
-                    elif col == 'price_change':
-                        data[col] = 0.0
-                    elif col == 'price_volume_ratio':
-                        data[col] = 100000.0
-                    elif col == 'price_over_volume':
-                        data[col] = 0.1
-            elif col in ['event_factor']:
-                # For external factors, use realistic random values
-                np.random.seed(42)  # For consistency
-                if col == 'event_factor':
-                    data[col] = np.random.normal(1, 0.15, len(data))
-            elif col in ['avg_price']:
-                # For avg_price, use a reasonable default
-                data[col] = 100.0
+                    data[col] = np.nan
+            elif col in ['event_factor', 'avg_price']:
+                # External or price factors are unknown in forecasting, keep as NaN
+                data[col] = np.nan
             elif col in ['month']:
                 # Extract month from week_start if available
                 if 'week_start' in data.columns:
@@ -260,8 +276,7 @@ def create_missing_features(data: pd.DataFrame, required_features: list) -> pd.D
                         # If conversion fails, use a default month
                         data[col] = 6  # Default to June
                 else:
-                    # Default to June if no week_start column
-                    data[col] = 6
+                    data[col] = np.nan
             elif col in ['is_holiday_week']:
                 # Extract holiday weeks from month if available
                 if 'month' in data.columns:
@@ -274,10 +289,8 @@ def create_missing_features(data: pd.DataFrame, required_features: list) -> pd.D
                         month_col = data['week_start'].dt.month
                         data[col] = month_col.isin([12, 1, 7, 8]).astype(int)
                     except Exception:
-                        # Default to non-holiday
                         data[col] = 0
                 else:
-                    # Default to non-holiday
                     data[col] = 0
             elif col.startswith('monthly_'):
                 # Monthly cyclical features
@@ -294,9 +307,9 @@ def create_missing_features(data: pd.DataFrame, required_features: list) -> pd.D
                         if 'month' not in data.columns:
                             data['month'] = month_col
                     except Exception:
-                        month_col = pd.Series([6] * len(data), index=data.index)  # Default to June
+                        month_col = pd.Series([6] * len(data), index=data.index)
                 else:
-                    month_col = pd.Series([6] * len(data), index=data.index)  # Default to June
+                    month_col = pd.Series([6] * len(data), index=data.index)
                 
                 if col == 'monthly_sin':
                     data[col] = np.sin(2 * np.pi * month_col / 12)
@@ -365,6 +378,9 @@ def train_models(df: pd.DataFrame, feature_cols: list, config: ModelConfig) -> D
     """
     from sklearn.model_selection import TimeSeriesSplit
     from helpers import time_series_cv_scores
+
+    # Drop rows with missing core features to avoid training on placeholder values
+    df = df.dropna(subset=feature_cols).copy()
     
     # Step 1: Split data and evaluate model performance
     split_method = (config.split_method or 'Time-based')
@@ -644,15 +660,16 @@ def generate_forecast(model_bundle: Dict[str, Any], history: pd.DataFrame, steps
         next_date = history['week_start'].iloc[-1] + timedelta(days=7)
         new_row = history.iloc[-1:].copy()
         new_row['week_start'] = next_date
-        
-        # Add new row to history
+
+        # Append placeholder row for feature calculation
         history = pd.concat([history, new_row], ignore_index=True)
-        
-        # Recalculate ALL features with forecasting_mode=True for realistic external factors
-        eng = enhanced_feature_engineering(history, forecasting_mode=True)
+
+        # Recalculate features only on recent window for efficiency
+        recent = history.tail(64).copy()
+        eng = enhanced_feature_engineering(recent, forecasting_mode=True)
         eng = create_missing_features(eng, feature_cols)
-        
-        # Get features for prediction
+
+        # Get features for prediction from the engineered recent window
         features = eng[feature_cols].iloc[-1:]
 
         # Apply preprocessing
@@ -805,22 +822,20 @@ def generate_detailed_forecast(res: Dict[str, Any], group_eng: pd.DataFrame, pro
     if forecast_method == 'Direct':
         # Create a copy of the historical data to use for feature engineering
         forecast_history = group_eng.copy()
-        
+
         for i in range(forecast_weeks):
-            # Create a new row for the forecast date
-            future_data = last_data.copy()
-            future_data['week_start'] = forecast_dates[i]
-            future_data['week_start'] = pd.to_datetime(future_data['week_start'])
-            
-            # Add the future data row to the history for proper feature calculation
-            temp_history = pd.concat([forecast_history, future_data], ignore_index=True)
-            
-            # Apply enhanced feature engineering with forecasting_mode=True for realistic external factors
-            temp_history = enhanced_feature_engineering(temp_history, forecasting_mode=True)
-            temp_history = create_missing_features(temp_history, feature_cols)
-            
-            # Get the last row which contains our forecast features
-            future_data = temp_history.iloc[-1:].copy()
+            # Append a new row for the forecast date
+            new_row = last_data.copy()
+            new_row['week_start'] = forecast_dates[i]
+            new_row['sales_volume'] = np.nan
+            forecast_history = pd.concat([forecast_history, new_row], ignore_index=True)
+
+            # Recompute features on the extended history
+            forecast_history = enhanced_feature_engineering(forecast_history, forecasting_mode=True)
+            forecast_history = create_missing_features(forecast_history, feature_cols)
+
+            # Extract features for the most recent row
+            future_data = forecast_history.iloc[-1:].copy()
             
             # No additional product-specific adjustments - rely on deterministic features only
             # The enhanced_feature_engineering with forecasting_mode=True already provides
@@ -862,6 +877,10 @@ def generate_detailed_forecast(res: Dict[str, Any], group_eng: pd.DataFrame, pro
                 forecast = (pred_lgbm + pred_rf) / 2
                 
             forecast_values.append(forecast[0])
+
+            # Update history with predicted value for subsequent steps
+            forecast_history.loc[forecast_history.index[-1], 'sales_volume'] = forecast[0]
+            last_data = forecast_history.iloc[-1:].copy()
             
             # Calculate confidence intervals
             if include_confidence:
