@@ -82,12 +82,12 @@ def enhanced_feature_engineering(df: pd.DataFrame, forecasting_mode: bool = Fals
                                            df['avg_price'] / df['sales_volume'],
                                            np.nan)
     else:
-        # Minimal price features based on sales volume patterns
-        df['price_elasticity'] = 1.0
-        df['price_volatility'] = 0.05  # Low constant volatility
-        df['price_change'] = 0.0
-        df['price_volume_ratio'] = df['sales_volume'] * 100
-        df['price_over_volume'] = 0.01
+        # When price information is unavailable, avoid injecting static defaults
+        df['price_elasticity'] = np.nan
+        df['price_volatility'] = np.nan
+        df['price_change'] = np.nan
+        df['price_volume_ratio'] = np.nan
+        df['price_over_volume'] = np.nan
 
     # Core volume-related features (deterministic trends)
     df['volume_trend'] = df.groupby(['Region', 'Product'])['sales_volume'].transform(
@@ -201,112 +201,128 @@ def create_missing_features(data: pd.DataFrame, required_features: list) -> pd.D
         DataFrame with all required features
     """
     data = data.copy()
-    
+
     for col in required_features:
-        if col not in data.columns:
-            if col.startswith('lag_'):
-                # For lag features, use the last available sales volume
-                lag_num = int(col.split('_')[1])
-                if 'sales_volume' in data.columns and len(data) > lag_num:
-                    data[col] = data['sales_volume'].shift(lag_num)
-                else:
-                    # Use a reasonable default based on available sales volume
-                    if 'sales_volume' in data.columns and len(data) > 0:
-                        data[col] = data['sales_volume'].mean()
-                    else:
-                        data[col] = 1000.0  # Default sales volume
-            elif col in ['price_elasticity', 'price_volatility', 'price_change', 'price_volume_ratio', 'price_over_volume']:
-                # For price-related features, use sales volume as proxy
-                if 'sales_volume' in data.columns:
-                    if col == 'price_elasticity':
-                        data[col] = data['sales_volume'] / data['sales_volume'].mean() if data['sales_volume'].mean() > 0 else 1.0
-                    elif col == 'price_volatility':
-                        data[col] = data['sales_volume'].rolling(4, min_periods=1).std() / (data['sales_volume'].mean() + 1e-10)
-                    elif col == 'price_change':
-                        data[col] = data['sales_volume'].pct_change() * 0.1
-                    elif col == 'price_volume_ratio':
-                        data[col] = data['sales_volume'] * 100
-                    elif col == 'price_over_volume':
-                        data[col] = np.where(data['sales_volume'] != 0, 100 / data['sales_volume'], 1.0)
-                else:
-                    # Default values when sales_volume is not available
-                    if col == 'price_elasticity':
-                        data[col] = 1.0
-                    elif col == 'price_volatility':
-                        data[col] = 0.1
-                    elif col == 'price_change':
-                        data[col] = 0.0
-                    elif col == 'price_volume_ratio':
-                        data[col] = 100000.0
-                    elif col == 'price_over_volume':
-                        data[col] = 0.1
-            elif col in ['event_factor']:
-                # For external factors, use realistic random values
-                np.random.seed(42)  # For consistency
-                if col == 'event_factor':
-                    data[col] = np.random.normal(1, 0.15, len(data))
-            elif col in ['avg_price']:
-                # For avg_price, use a reasonable default
-                data[col] = 100.0
-            elif col in ['month']:
-                # Extract month from week_start if available
-                if 'week_start' in data.columns:
-                    try:
-                        # Ensure week_start is datetime
-                        if not pd.api.types.is_datetime64_any_dtype(data['week_start']):
-                            data['week_start'] = pd.to_datetime(data['week_start'])
-                        data[col] = data['week_start'].dt.month
-                    except Exception:
-                        # If conversion fails, use a default month
-                        data[col] = 6  # Default to June
-                else:
-                    # Default to June if no week_start column
-                    data[col] = 6
-            elif col in ['is_holiday_week']:
-                # Extract holiday weeks from month if available
-                if 'month' in data.columns:
-                    data[col] = data['month'].isin([12, 1, 7, 8]).astype(int)
-                elif 'week_start' in data.columns:
-                    try:
-                        # Ensure week_start is datetime
-                        if not pd.api.types.is_datetime64_any_dtype(data['week_start']):
-                            data['week_start'] = pd.to_datetime(data['week_start'])
-                        month_col = data['week_start'].dt.month
-                        data[col] = month_col.isin([12, 1, 7, 8]).astype(int)
-                    except Exception:
-                        # Default to non-holiday
-                        data[col] = 0
-                else:
-                    # Default to non-holiday
-                    data[col] = 0
-            elif col.startswith('monthly_'):
-                # Monthly cyclical features
-                month_col = None
-                if 'month' in data.columns:
-                    month_col = data['month']
-                elif 'week_start' in data.columns:
-                    try:
-                        # Ensure week_start is datetime
-                        if not pd.api.types.is_datetime64_any_dtype(data['week_start']):
-                            data['week_start'] = pd.to_datetime(data['week_start'])
-                        month_col = data['week_start'].dt.month
-                        # Also create the month column for future use
-                        if 'month' not in data.columns:
-                            data['month'] = month_col
-                    except Exception:
-                        month_col = pd.Series([6] * len(data), index=data.index)  # Default to June
-                else:
-                    month_col = pd.Series([6] * len(data), index=data.index)  # Default to June
-                
-                if col == 'monthly_sin':
-                    data[col] = np.sin(2 * np.pi * month_col / 12)
-                elif col == 'monthly_cos':
-                    data[col] = np.cos(2 * np.pi * month_col / 12)
+        if col in data.columns:
+            continue
+        if col.startswith('lag_'):
+            lag = int(col.split('_')[1])
+            if 'sales_volume' in data.columns:
+                data[col] = data['sales_volume'].shift(lag)
             else:
-                # For any other missing features, use zero
-                data[col] = 0.0
-    
+                data[col] = np.nan
+        elif col in {'month', 'week_of_year'}:
+            if 'week_start' in data.columns:
+                dt = pd.to_datetime(data['week_start'])
+                if col == 'month':
+                    data[col] = dt.dt.month
+                else:
+                    data[col] = dt.dt.isocalendar().week
+            else:
+                data[col] = np.nan
+        elif col == 'is_holiday_week':
+            if 'month' in data.columns:
+                data[col] = data['month'].isin([12, 1, 7, 8]).astype(int)
+            else:
+                data[col] = 0
+        elif col in {'monthly_sin', 'monthly_cos'}:
+            if 'month' in data.columns:
+                if col == 'monthly_sin':
+                    data[col] = np.sin(2 * np.pi * data['month'] / 12)
+                else:
+                    data[col] = np.cos(2 * np.pi * data['month'] / 12)
+            else:
+                data[col] = np.nan
+        else:
+            data[col] = np.nan
+
     return data
+
+
+def update_recent_features(history: pd.DataFrame) -> pd.DataFrame:
+    """Recompute lag and rolling features for the most recent row.
+
+    This utility updates only the newest observation in ``history`` to avoid
+    recomputing the entire feature set during recursive forecasting.
+
+    Args:
+        history: DataFrame containing at least columns
+            ``['Region', 'Product', 'week_start', 'sales_volume']``.
+
+    Returns:
+        The history DataFrame with the last row's features refreshed.
+    """
+    if history.empty:
+        return history
+
+    if not pd.api.types.is_datetime64_any_dtype(history['week_start']):
+        history['week_start'] = pd.to_datetime(history['week_start'])
+
+    idx = history.index[-1]
+    region = history.loc[idx, 'Region']
+    product = history.loc[idx, 'Product']
+    group = history[(history['Region'] == region) & (history['Product'] == product)].sort_values('week_start')
+
+    # Calendar features
+    history.at[idx, 'month'] = group['week_start'].dt.month.iloc[-1]
+    history.at[idx, 'week_of_year'] = group['week_start'].dt.isocalendar().week.iloc[-1]
+    history.at[idx, 'is_holiday_week'] = int(history.at[idx, 'month'] in [12, 1, 7, 8])
+
+    # Lag features
+    for lag in [1, 2, 4, 8]:
+        col = f'lag_{lag}'
+        history.at[idx, col] = group['sales_volume'].shift(lag).iloc[-1] if len(group) > lag else np.nan
+
+    # Rolling statistics
+    history.at[idx, 'volume_trend'] = group['sales_volume'].rolling(12, min_periods=1).mean().iloc[-1]
+    history.at[idx, 'volume_change'] = group['sales_volume'].pct_change().rolling(4, min_periods=1).mean().iloc[-1]
+    history.at[idx, 'volume_volatility'] = group['sales_volume'].rolling(8, min_periods=1).std().iloc[-1]
+
+    for window in [4, 8, 12, 16]:
+        history.at[idx, f'roll{window}_mean'] = group['sales_volume'].rolling(window, min_periods=1).mean().iloc[-1]
+        history.at[idx, f'roll{window}_std'] = group['sales_volume'].rolling(window, min_periods=1).std().iloc[-1]
+
+    history.at[idx, 'ma4_ma12_ratio'] = history.at[idx, 'roll4_mean'] / (history.at[idx, 'roll12_mean'] + 1e-10)
+    history.at[idx, 'ma8_ma16_ratio'] = history.at[idx, 'roll8_mean'] / (history.at[idx, 'roll16_mean'] + 1e-10)
+
+    # Seasonal encodings
+    week_num = int(history.at[idx, 'week_of_year'])
+    month_num = int(history.at[idx, 'month'])
+    history.at[idx, 'seasonal_sin'] = np.sin(2 * np.pi * week_num / 52)
+    history.at[idx, 'seasonal_cos'] = np.cos(2 * np.pi * week_num / 52)
+    history.at[idx, 'quarterly_sin'] = np.sin(2 * np.pi * week_num / 13)
+    history.at[idx, 'quarterly_cos'] = np.cos(2 * np.pi * week_num / 13)
+    history.at[idx, 'monthly_sin'] = np.sin(2 * np.pi * month_num / 12)
+    history.at[idx, 'monthly_cos'] = np.cos(2 * np.pi * month_num / 12)
+
+    history.at[idx, 'trend_factor'] = week_num / 52
+    history.at[idx, 'trend_squared'] = (week_num / 52) ** 2
+
+    # Year trend
+    history.at[idx, 'year'] = group['week_start'].dt.year.iloc[-1]
+    min_year = history['year'].min()
+    history.at[idx, 'year_trend'] = (history.at[idx, 'year'] - min_year) / max(1, history['year'].max() - min_year)
+
+    # Regional and product trends
+    history.at[idx, 'regional_trend'] = history[history['Region'] == region]['sales_volume'].rolling(16, min_periods=1).mean().iloc[-1]
+    history.at[idx, 'product_trend'] = history[history['Product'] == product]['sales_volume'].rolling(16, min_periods=1).mean().iloc[-1]
+
+    # Price features if available
+    if 'avg_price' in history.columns and not history['avg_price'].isna().all():
+        history.at[idx, 'price_elasticity'] = (
+            history.at[idx, 'sales_volume'] / history.at[idx, 'avg_price'] if history.at[idx, 'avg_price'] not in [0, np.nan] else np.nan
+        )
+        history.at[idx, 'price_volatility'] = group['avg_price'].rolling(8, min_periods=1).std().iloc[-1]
+        history.at[idx, 'price_change'] = group['avg_price'].pct_change().rolling(4, min_periods=1).mean().iloc[-1]
+        history.at[idx, 'price_volume_ratio'] = history.at[idx, 'avg_price'] * history.at[idx, 'sales_volume']
+        history.at[idx, 'price_over_volume'] = (
+            history.at[idx, 'avg_price'] / history.at[idx, 'sales_volume'] if history.at[idx, 'sales_volume'] not in [0, np.nan] else np.nan
+        )
+    else:
+        history.loc[idx, ['price_elasticity', 'price_volatility', 'price_change', 'price_volume_ratio', 'price_over_volume']] = np.nan
+
+    logger.debug("Updated features for %s %s at %s", region, product, history.at[idx, 'week_start'])
+    return history
 
 
 def _tree_based_feature_selection(X_train: pd.DataFrame, y_train: pd.Series, 
@@ -629,7 +645,7 @@ def generate_forecast(model_bundle: Dict[str, Any], history: pd.DataFrame, steps
     if not pd.api.types.is_datetime64_any_dtype(history['week_start']):
         history['week_start'] = pd.to_datetime(history['week_start'])
 
-    # Ensure all required features are created
+    # Ensure all required features are created for the initial history
     history = enhanced_feature_engineering(history, forecasting_mode=False, random_state=42)
     history = create_missing_features(history, feature_cols)
 
@@ -642,18 +658,20 @@ def generate_forecast(model_bundle: Dict[str, Any], history: pd.DataFrame, steps
     for step in range(steps):
         # Create new row with next date
         next_date = history['week_start'].iloc[-1] + timedelta(days=7)
-        new_row = history.iloc[-1:].copy()
-        new_row['week_start'] = next_date
-        
-        # Add new row to history
-        history = pd.concat([history, new_row], ignore_index=True)
-        
-        # Recalculate ALL features with forecasting_mode=True for realistic external factors
-        eng = enhanced_feature_engineering(history, forecasting_mode=True)
-        eng = create_missing_features(eng, feature_cols)
-        
+        new_row = {
+            'week_start': next_date,
+            'Region': history['Region'].iloc[-1],
+            'Product': history['Product'].iloc[-1],
+            'sales_volume': np.nan
+        }
+        history = pd.concat([history, pd.DataFrame([new_row])], ignore_index=True)
+
+        # Update features for the new row based on existing history
+        history = update_recent_features(history)
+        history = create_missing_features(history, feature_cols)
+
         # Get features for prediction
-        features = eng[feature_cols].iloc[-1:]
+        features = history[feature_cols].iloc[-1:]
 
         # Apply preprocessing
         features_clean = pd.DataFrame(imputer.transform(features), columns=feature_cols, index=features.index)
@@ -701,6 +719,8 @@ def generate_forecast(model_bundle: Dict[str, Any], history: pd.DataFrame, steps
 
         # Update history with the forecasted value for next iteration
         history.loc[history.index[-1], 'sales_volume'] = forecast[0]
+        history = update_recent_features(history)
+        logger.info("Forecast step %d: %.4f", step + 1, forecast[0])
 
     # Return results as a dictionary
     result = {
