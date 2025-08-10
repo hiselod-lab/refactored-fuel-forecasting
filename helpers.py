@@ -782,3 +782,31 @@ def prepare_df_for_display(df: Optional[pd.DataFrame]) -> Optional[pd.DataFrame]
     return df_display
 
 
+def export_forecast_debug(actual: pd.Series, forecast_dates: List[pd.Timestamp],
+                           forecast_values: List[float], path_prefix: str) -> Tuple[str, str]:
+    """Export forecast vs. actual comparison to CSV and PNG for debugging."""
+    import matplotlib.pyplot as plt
+
+    df = pd.DataFrame({
+        'week_start': forecast_dates,
+        'forecast': forecast_values
+    })
+    if actual is not None:
+        df['actual'] = actual.values[:len(df)]
+
+    csv_path = f"{path_prefix}.csv"
+    png_path = f"{path_prefix}.png"
+    df.to_csv(csv_path, index=False)
+
+    plt.figure(figsize=(6, 3))
+    if actual is not None:
+        plt.plot(actual.index[:len(df)], actual.values[:len(df)], label='Actual')
+    plt.plot(forecast_dates, forecast_values, label='Forecast')
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(png_path)
+    plt.close()
+
+    return csv_path, png_path
+
+
